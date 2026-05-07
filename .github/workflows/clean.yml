@@ -1,0 +1,26 @@
+name: VK Auto Cleaner
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # Запуск каждый день в 3 часа ночи по Гринвичу
+  workflow_dispatch: # Позволяет запустить вручную кнопкой
+
+jobs:
+  run-cleaner:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run script
+        env:
+          VK_TOKEN: ${{ secrets.VK_TOKEN }}
+        run: python main.py
