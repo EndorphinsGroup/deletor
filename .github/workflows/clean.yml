@@ -2,8 +2,8 @@ name: VK Auto Cleaner
 
 on:
   schedule:
-    - cron: '0 3 * * *' # Запуск каждый день в 3 часа ночи по Гринвичу
-  workflow_dispatch: # Позволяет запустить вручную кнопкой
+    - cron: '0 3 * * *' # Запуск в 3 утра
+  workflow_dispatch: # Ручной запуск
 
 jobs:
   run-cleaner:
@@ -18,7 +18,8 @@ jobs:
           python-version: '3.9'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install vk_api requests python-dateutil
 
       - name: Run script
         env:
