@@ -9,64 +9,58 @@ from dateutil.relativedelta import relativedelta
 # --- НАСТРОЙКИ ---
 TOKEN = os.getenv('VK_TOKEN')
 GROUP_NAMES = ['givepromo', 'anton_kupon'] 
-
-# СТРОГО 2 МЕСЯЦА: 
-# Если сегодня 13 мая, то посты от 14 марта и свежее НЕ удалятся.
 MONTHS_OFFSET = 2 
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
-}
+# Сессия для ускорения запросов и кэш ссылок
+session = requests.Session()
+session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'})
+URL_CACHE = {}
 
 def expand_url(url):
-    """Глубокая проверка сокращенной ссылки на erid"""
+    """Проверка сокращенной ссылки на erid"""
     url = url.strip('.,()[]"\'')
-    if 'erid' in url.lower():
-        return True
+    if 'erid' in url.lower(): return True
+    if url in URL_CACHE: return URL_CACHE[url]
     
     try:
-        # Используем GET для прохода через все рекламные редиректы
-        response = requests.get(url, headers=HEADERS, allow_redirects=True, timeout=10)
-        final_url = response.url.lower()
-        
-        if 'erid' in final_url or '%26erid' in final_url or 'erid%3d' in final_url:
-            return True
+        # Пытаемся быстро получить финальный URL
+        resp = session.get(url, allow_redirects=True, timeout=5, stream=True)
+        final_url = resp.url.lower()
+        resp.close()
+        found = any(x in final_url for x in ['erid', '%26erid', 'erid%3d'])
+        URL_CACHE[url] = found
+        return found
     except:
-        pass
-    return False
-
-def get_group_id(vk, screen_name):
-    try:
-        res = vk.utils.resolveScreenName(screen_name=screen_name)
-        if res and res['type'] == 'group':
-            return -res['object_id']
-    except: pass
-    return None
+        URL_CACHE[url] = False
+        return False
 
 def process_wall():
     if not TOKEN:
-        print("Ошибка: VK_TOKEN не найден в Secrets!")
+        print("Ошибка: VK_TOKEN не найден!")
         return
 
-    vk_session = vk_api.VkApi(token=TOKEN)
-    vk = vk_session.get_api()
-
-    # Вычисляем дату-отсечку
+    vk = vk_api.VkApi(token=TOKEN).get_api()
     now = datetime.now()
     threshold_date = now - relativedelta(months=MONTHS_OFFSET)
 
-    print(f"--- ЗАПУСК ОЧИСТКИ ---")
-    print(f"Сегодня: {now.strftime('%Y-%m-%d %H:%M')}")
-    print(f"Удаляем рекламу ТОЛЬКО СТАРШЕ, ЧЕМ: {threshold_date.strftime('%Y-%m-%d %H:%M')}")
-    print(f"(Все посты новее этой даты останутся нетронутыми)")
+    print(f"=== ЗАПУСК БОТА ===")
+    print(f"Сегодня: {now.strftime('%d.%m.%Y %H:%M')}")
+    print(f"Порог (не трогаем новее): {threshold_date.strftime('%d.%m.%Y %H:%M')}")
 
     for name in GROUP_NAMES:
-        group_id = get_group_id(vk, name)
-        if not group_id: continue
+        print(f"\n>>> НАЧИНАЕМ ОБРАБОТКУ ГРУППЫ: {name}")
         
-        print(f"\n>>> Проверка группы: {name}")
+        # Получаем ID группы
+        try:
+            res = vk.utils.resolveScreenName(screen_name=name)
+            group_id = -res['object_id']
+        except:
+            print(f"!!! Не удалось найти группу {name}")
+            continue
+
         offset = 0
-        deleted_count = 0
+        total_deleted = 0
+        total_checked = 0
 
         while True:
             try:
@@ -75,53 +69,67 @@ def process_wall():
                 if not posts: break
                 
                 for post in posts:
+                    total_checked += 1
                     post_date = datetime.fromtimestamp(post['date'])
+                    post_id = post['id']
                     
-                    # ПРОВЕРКА ДАТЫ: если пост старый (меньше или равен дате-отсечке)
-                    if post_date <= threshold_date:
-                        post_id = post['id']
+                    # 1. Проверка даты
+                    if post_date > threshold_date:
+                        # Пост слишком свежий
+                        status = "СВЕЖИЙ (пропуск)"
+                    else:
+                        # Пост старый, ищем рекламу
                         text = post.get('text', '')
                         found_erid = False
+                        reason = ""
 
-                        # 1. Текст
+                        # Поиск в тексте
                         if 'erid' in text.lower() or 'ерид' in text.lower():
                             found_erid = True
+                            reason = "erid в тексте"
                         
-                        # 2. Ссылки в тексте (даже сокращенные)
+                        # Поиск в ссылках
                         if not found_erid:
                             urls = re.findall(r'(https?://[^\s<>"]+)', text)
                             for u in urls:
                                 if expand_url(u):
                                     found_erid = True
+                                    reason = f"erid в ссылке {u[:30]}..."
                                     break
                         
-                        # 3. Кнопки и карточки
+                        # Поиск во вложениях
                         if not found_erid and 'attachments' in post:
                             for attach in post['attachments']:
                                 if attach['type'] == 'link':
                                     if expand_url(attach['link']['url']):
                                         found_erid = True
+                                        reason = "erid в кнопке/ссылке"
                                         break
 
                         if found_erid:
                             try:
                                 vk.wall.delete(owner_id=group_id, post_id=post_id)
-                                print(f"   [УДАЛЕНО] Пост {post_id} от {post_date.strftime('%Y-%m-%d')}")
-                                deleted_count += 1
-                                time.sleep(0.5)
-                            except Exception as e:
-                                print(f"   Ошибка удаления {post_id}: {e}")
-                    
+                                status = f"УДАЛЕН ({reason})"
+                                total_deleted += 1
+                                time.sleep(0.3)
+                            except:
+                                status = "ОШИБКА УДАЛЕНИЯ"
+                        else:
+                            status = "ОК (нет рекламы)"
+
+                    # Выводим лог каждые 10 постов
+                    if total_checked % 10 == 0:
+                        print(f"   [{total_checked}] Пост {post_id} от {post_date.strftime('%d.%m')}: {status}")
+
                 offset += 100
-                # Если текущая пачка постов уже свежее порога, и мы не в начале, 
-                # можно было бы прерваться, но в ВК посты могут идти не по порядку (закрепы),
-                # поэтому надежнее просмотреть все.
-                if len(posts) < 100: break
+                # Ограничение, чтобы не сканировать вечность (последние 1500 постов)
+                if total_checked >= 1500 or len(posts) < 100:
+                    break
             except Exception as e:
-                print(f"Ошибка API: {e}")
+                print(f"Ошибка при чтении стены: {e}")
                 break
 
-        print(f"Итог по {name}: удалено {deleted_count} рекламных постов.")
+        print(f"--- Итог по {name}: Проверено {total_checked}, Удалено {total_deleted}")
 
 if __name__ == "__main__":
     process_wall()
